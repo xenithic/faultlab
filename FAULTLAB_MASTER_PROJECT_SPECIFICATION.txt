@@ -1,0 +1,985 @@
+============================================================
+FAULTLAB — MASTER PROJECT SPECIFICATION
+============================================================
+
+DOCUMENT STATUS: OFFICIAL PROJECT BASELINE
+PROJECT TYPE: FINAL-YEAR MAJOR PROJECT
+PROJECT NAME: FaultLab
+
+IMPORTANT:
+This document defines the current official scope, architecture,
+technology stack, objectives, and boundaries of FaultLab.
+
+This document should be treated as the primary source of truth
+for project-related discussions, documentation, PPTs, reports,
+research, and presentations.
+
+Features or technologies not mentioned as part of the core scope
+must NOT be assumed to be implemented.
+
+============================================================
+1. PROJECT OVERVIEW
+============================================================
+
+FaultLab is a web-based chaos engineering and resilience testing
+platform for containerized applications.
+
+The platform allows users to intentionally introduce controlled
+failures into an isolated target application, observe the resulting
+system behavior, collect performance and infrastructure metrics,
+measure recovery, and compare resilience before and after
+improvements.
+
+The core engineering workflow is:
+
+INJECT → OBSERVE → MEASURE → RECOVER → COMPARE
+
+FaultLab is designed as an educational/research-oriented resilience
+testing platform rather than a replacement for enterprise chaos
+engineering products.
+
+============================================================
+2. PROBLEM STATEMENT
+============================================================
+
+Modern applications increasingly rely on multiple interconnected
+services. Failures in one service, database, network connection, or
+infrastructure component can cause performance degradation,
+cascading failures, or complete service disruption.
+
+Traditional testing often focuses on whether an application works
+under normal conditions. It may not adequately reveal how the
+application behaves when dependencies fail or resources become
+constrained.
+
+FaultLab addresses this problem by providing a controlled environment
+where failures can be deliberately introduced into containerized
+applications and their effects can be measured.
+
+Instead of waiting for real-world failures to reveal weaknesses,
+developers can perform controlled resilience experiments and use the
+results to identify areas for improvement.
+
+============================================================
+3. PRIMARY OBJECTIVE
+============================================================
+
+The primary objective of FaultLab is to provide a safe, controlled,
+and measurable environment for testing the resilience of
+containerized applications.
+
+The platform should allow a user to:
+
+1. Select a registered target application/service.
+2. Select a controlled fault type.
+3. Configure fault parameters such as duration or intensity.
+4. Establish/record a baseline.
+5. Inject the selected fault.
+6. Monitor the application's behavior during the experiment.
+7. Observe recovery after the fault ends or is removed.
+8. Calculate and store experiment results.
+9. Compare results across experiments.
+10. Use the results to evaluate resilience improvements.
+
+============================================================
+4. HIGH-LEVEL SYSTEM STRUCTURE
+============================================================
+
+FaultLab consists of TWO major environments:
+
+A. FAULTLAB PLATFORM
+B. TARGET APPLICATION
+
+------------------------------------------------------------
+A. FAULTLAB PLATFORM
+------------------------------------------------------------
+
+This is the actual major project.
+
+It is responsible for:
+
+- Experiment creation
+- Target/service selection
+- Fault selection
+- Fault configuration
+- Fault injection
+- Metrics collection
+- Real-time monitoring
+- Experiment lifecycle management
+- Recovery measurement
+- Result analysis
+- Experiment history
+- Resilience evaluation
+
+Basic flow:
+
+React Dashboard
+      ↓
+Flask Backend
+      ↓
+Experiment Engine
+      ↓
+Docker SDK
+      ↓
+Target Application Containers
+
+------------------------------------------------------------
+B. TARGET APPLICATION
+------------------------------------------------------------
+
+The target application is a small, functional,
+microservice-based e-commerce/order application.
+
+It exists primarily as a controlled laboratory subject for FaultLab.
+
+It should have enough real functionality and service dependencies
+to make resilience experiments meaningful.
+
+The target application is NOT a separate major project.
+
+It should remain intentionally lightweight.
+
+============================================================
+5. TARGET APPLICATION ARCHITECTURE
+============================================================
+
+The target application consists of:
+
+1. API Gateway
+2. Product Service
+3. Order Service
+4. Inventory Service
+5. Payment Service
+6. PostgreSQL Database
+
+Architecture:
+
+                    Target Web App
+                         |
+                    API Gateway
+                         |
+          +--------------+--------------+
+          |              |              |
+          v              v              v
+      Product          Order         Payment
+      Service          Service       Service
+                         |
+                         v
+                    Inventory
+                     Service
+                         |
+                         v
+                    PostgreSQL
+
+
+------------------------------------------------------------
+5.1 API GATEWAY
+------------------------------------------------------------
+
+Purpose:
+
+- Acts as the main entry point for the target application's
+  frontend.
+- Routes requests to the appropriate backend service.
+
+It should hide internal service details from the frontend.
+
+------------------------------------------------------------
+5.2 PRODUCT SERVICE
+------------------------------------------------------------
+
+Responsibilities:
+
+- Product listing
+- Product details
+- Basic product search/filtering
+
+FaultLab relevance:
+
+- Provides a relatively independent service.
+- Can be used for latency and HTTP error experiments.
+- Can act as a comparison/control service.
+
+------------------------------------------------------------
+5.3 ORDER SERVICE
+------------------------------------------------------------
+
+Responsibilities:
+
+- Creating orders
+- Viewing orders
+- Tracking order status
+- Coordinating the order workflow
+
+FaultLab relevance:
+
+- Central service with multiple dependencies.
+- Useful for studying dependency failures and cascading effects.
+
+------------------------------------------------------------
+5.4 INVENTORY SERVICE
+------------------------------------------------------------
+
+Responsibilities:
+
+- Checking stock availability
+- Reserving stock
+- Updating stock
+
+FaultLab relevance:
+
+- Useful for database/service failures.
+- Useful for latency and dependency experiments.
+- Can demonstrate how inventory failures affect order processing.
+
+------------------------------------------------------------
+5.5 PAYMENT SERVICE
+------------------------------------------------------------
+
+The Payment Service is a SIMULATED payment service.
+
+No real payment gateway is required.
+
+Responsibilities:
+
+- Receiving payment requests
+- Simulating payment success/failure
+- Returning payment status
+
+FaultLab relevance:
+
+- Suitable for latency experiments.
+- Suitable for timeout/failure scenarios.
+- Suitable for HTTP error injection.
+- Suitable for service failure experiments.
+
+------------------------------------------------------------
+5.6 POSTGRESQL
+------------------------------------------------------------
+
+PostgreSQL is the structured database dependency.
+
+It may store:
+
+- Users
+- Products
+- Inventory
+- Orders
+- Payment records
+- Experiment data for FaultLab
+
+PostgreSQL is NOT treated as an application microservice.
+
+A single PostgreSQL instance/container is preferred for simplicity.
+
+============================================================
+6. TARGET APPLICATION USER WORKFLOW
+============================================================
+
+The target application should have basic usable functionality.
+
+Typical workflow:
+
+Browse Products
+      ↓
+View Product
+      ↓
+Add to Cart
+      ↓
+Place Order
+      ↓
+Check Inventory
+      ↓
+Process Payment
+      ↓
+Confirm Order
+
+The target application should be functional enough that the effects
+of service failures can be demonstrated through real application
+behavior.
+
+It should NOT be developed into a full-scale e-commerce platform.
+
+============================================================
+7. FAULTLAB CORE FAULT TYPES
+============================================================
+
+The initial core scope contains FIVE fault categories.
+
+------------------------------------------------------------
+7.1 SERVICE FAILURE
+------------------------------------------------------------
+
+A selected target container/service is intentionally stopped.
+
+Example:
+
+Order Service
+    ↓
+FAULT
+    ↓
+Order Service DOWN
+
+Implementation may use the Docker SDK to control the registered
+target container.
+
+------------------------------------------------------------
+7.2 SERVICE PAUSE / RESTART
+------------------------------------------------------------
+
+A service can be temporarily interrupted and subsequently restarted.
+
+Purpose:
+
+- Observe temporary service disruption.
+- Measure recovery behavior.
+
+------------------------------------------------------------
+7.3 LATENCY INJECTION
+------------------------------------------------------------
+
+Controlled delay is introduced into service communication or request
+processing.
+
+Example:
+
+Normal latency: 40 ms
+Injected latency: 500 ms
+
+Purpose:
+
+- Study application behavior under slow dependencies.
+- Observe latency propagation.
+- Evaluate timeout/fallback behavior where applicable.
+
+------------------------------------------------------------
+7.4 CPU / MEMORY RESOURCE STRESS
+------------------------------------------------------------
+
+Controlled CPU or memory pressure is introduced against a registered
+target container.
+
+Purpose:
+
+- Observe performance degradation.
+- Monitor resource utilization.
+- Evaluate application behavior under resource constraints.
+
+------------------------------------------------------------
+7.5 HTTP ERROR INJECTION
+------------------------------------------------------------
+
+Controlled HTTP failures can be introduced.
+
+Examples:
+
+- HTTP 500
+- HTTP 503
+
+The fault may be configured to affect a percentage of requests.
+
+Purpose:
+
+- Study application behavior under dependency/API errors.
+- Observe error propagation and graceful failure.
+
+============================================================
+8. FAULT INJECTION BOUNDARY
+============================================================
+
+FaultLab must operate only on explicitly registered and isolated
+target environments.
+
+FaultLab must NOT be designed to attack arbitrary external systems.
+
+Fault injection should be restricted to the project's controlled
+Docker environment.
+
+This provides:
+
+- Safety
+- Isolation
+- Reproducibility
+- Controlled experimentation
+
+The platform should validate that a requested experiment targets a
+registered FaultLab environment/container.
+
+============================================================
+9. EXPERIMENT LIFECYCLE
+============================================================
+
+Every FaultLab experiment follows the general lifecycle:
+
+1. Establish baseline
+2. Select target
+3. Select fault
+4. Configure duration/intensity
+5. Start experiment
+6. Inject fault
+7. Collect metrics
+8. Observe impact
+9. End/remove fault
+10. Observe recovery
+11. Calculate results
+12. Store experiment
+13. Display results
+
+This lifecycle is central to FaultLab.
+
+============================================================
+10. METRICS
+============================================================
+
+FaultLab should collect two main categories of metrics.
+
+------------------------------------------------------------
+10.1 APPLICATION METRICS
+------------------------------------------------------------
+
+Core application metrics:
+
+- Request count
+- Response time / latency
+- Successful requests
+- Failed requests
+- Error rate
+- Availability
+- Recovery time
+
+------------------------------------------------------------
+10.2 CONTAINER / INFRASTRUCTURE METRICS
+------------------------------------------------------------
+
+Core container metrics:
+
+- CPU usage
+- Memory usage
+- Network I/O
+- Container state/status
+
+The project should prioritize genuine measurements rather than
+hard-coded or fake statistics.
+
+============================================================
+11. EXPERIMENT RESULT EXAMPLE
+============================================================
+
+Example:
+
+Experiment #14
+
+Target:
+Order Service
+
+Fault:
+500 ms Latency
+
+Duration:
+30 seconds
+
+BEFORE:
+Latency: 42 ms
+Error Rate: 0.3%
+
+DURING:
+Latency: 561 ms
+Error Rate: 11.7%
+
+AFTER:
+Latency: 45 ms
+Error Rate: 0.4%
+
+Recovery Time:
+4.2 seconds
+
+The exact values above are illustrative only.
+Actual values must be collected from real experiments.
+
+============================================================
+12. RESILIENCE EVALUATION
+============================================================
+
+FaultLab is not simply a tool for stopping containers.
+
+The purpose is to evaluate how well an application behaves under
+controlled failures.
+
+The general engineering cycle is:
+
+Normal System
+      ↓
+Controlled Failure
+      ↓
+Observe Impact
+      ↓
+Measure
+      ↓
+Identify Weakness
+      ↓
+Improve Application
+      ↓
+Repeat Experiment
+      ↓
+Compare Results
+
+Example:
+
+BEFORE RESILIENCE IMPROVEMENT:
+
+Error Rate: 38%
+Recovery Time: 14.2 sec
+Availability: 71%
+
+AFTER adding an appropriate resilience mechanism:
+
+Error Rate: 7%
+Recovery Time: 3.1 sec
+Availability: 94%
+
+The values are illustrative.
+
+The actual project should use measured experimental data.
+
+Possible resilience mechanisms that may be demonstrated include:
+
+- Timeouts
+- Retry limits
+- Circuit breakers
+- Graceful degradation
+- Redundancy/failover
+
+These mechanisms are primarily part of the TARGET APPLICATION /
+experimental evaluation rather than separate FaultLab core features.
+
+============================================================
+13. FAULTLAB DASHBOARD
+============================================================
+
+The dashboard should provide a clear visual representation of the
+system and experiments.
+
+Core dashboard information:
+
+- Registered target services
+- Service/container status
+- Current experiment
+- Active fault
+- Fault status
+- Latency
+- Error rate
+- CPU usage
+- Memory usage
+- Availability
+- Recovery information
+
+Example:
+
+FAULTLAB
+
+Target Services:
+
+API          GREEN
+Orders       GREEN
+Inventory    GREEN
+Payment      GREEN
+Database     GREEN
+
+Active Experiment:
+Fault: 500 ms Latency
+Status: RUNNING
+
+Charts:
+- Latency
+- Error Rate
+- CPU Usage
+- Memory Usage
+
+------------------------------------------------------------
+13.1 EXPERIMENT PAGE
+------------------------------------------------------------
+
+Should display:
+
+- Target
+- Fault type
+- Duration
+- Intensity/configuration
+- Start time
+- End time
+- Metrics
+- Result
+- Recovery time
+
+------------------------------------------------------------
+13.2 EXPERIMENT HISTORY
+------------------------------------------------------------
+
+Previous experiments should be stored and displayed.
+
+Example:
+
+#12  Database Failure       Completed
+#13  CPU Stress             Completed
+#14  Latency Injection      Completed
+#15  Service Failure        Completed
+
+============================================================
+14. TECHNOLOGY STACK
+============================================================
+
+CORE STACK:
+
+Frontend:
+React
+
+Backend:
+Python + Flask
+
+Database:
+PostgreSQL
+
+Containerization:
+Docker + Docker Compose
+
+Container Control:
+Docker SDK for Python
+
+Real-Time Communication:
+WebSockets
+
+Charts / Visualization:
+Chart.js
+
+Cloud Deployment:
+AWS EC2
+
+Version Control:
+Git + GitHub
+
+------------------------------------------------------------
+OPTIONAL TECHNOLOGIES
+------------------------------------------------------------
+
+The following may be considered later if genuinely useful:
+
+- Prometheus
+- Grafana
+- Redis
+
+These are NOT part of the required core implementation.
+
+Do not add them simply to make the technology stack appear larger.
+
+============================================================
+15. AWS DEPLOYMENT
+============================================================
+
+AWS EC2 is the intended final cloud deployment environment.
+
+Development should primarily occur locally.
+
+LOCAL:
+
+Laptop
+ |
+ +-- FaultLab
+ |
+ +-- Target Application
+       |
+       +-- Docker
+
+FINAL:
+
+AWS EC2
+ |
+ +-- FaultLab
+ |
+ +-- Target Application
+       |
+       +-- Docker
+
+AWS should not be required for every development iteration.
+
+The application should remain capable of running locally.
+
+============================================================
+16. COST / BUDGET
+============================================================
+
+The project is designed to be FREE-FIRST.
+
+No paid API is required for the core system.
+
+Expected free/open-source technologies include:
+
+- Python
+- Flask
+- React
+- Docker
+- PostgreSQL
+- Chart.js
+- WebSockets
+- Git
+- GitHub
+- VS Code
+
+Local development can be performed without project-specific
+software costs.
+
+AWS EC2 may potentially be free depending on the current AWS
+account's free-tier/credit eligibility, region, instance type,
+and AWS pricing terms.
+
+AWS free usage must NOT be assumed permanently.
+
+Development should therefore remain possible locally even if cloud
+hosting later incurs a cost.
+
+============================================================
+17. HARD PROJECT BOUNDARIES
+============================================================
+
+The following are NOT part of the core project:
+
+- AI-powered fault generation
+- Machine-learning failure prediction
+- Multi-cloud chaos testing
+- Arbitrary external system attacks
+- Production infrastructure destruction
+- 50+ fault types
+- Large-scale enterprise microservice architecture
+- Kubernetes as a required component
+- Full enterprise monitoring infrastructure
+- Real payment gateways
+- Large-scale e-commerce functionality
+- Replacement of enterprise chaos engineering platforms
+
+The project should remain focused on controlled resilience testing
+of an isolated containerized application.
+
+============================================================
+18. MAJOR PROJECT VALUE
+============================================================
+
+FaultLab's technical depth comes from the complete experimental
+workflow rather than simply the number of technologies used.
+
+The project combines:
+
+- Web application development
+- Distributed/microservice architecture
+- Containerization
+- Fault injection
+- Infrastructure control
+- Observability
+- Performance measurement
+- Resilience engineering
+- Experiment management
+- Data persistence
+- Cloud deployment
+
+The central research/engineering question is:
+
+"How does a containerized application behave under controlled
+failures, and how can resilience improvements be measured?"
+
+============================================================
+19. MVP
+============================================================
+
+The minimum viable FaultLab should include:
+
+- React dashboard
+- Flask backend
+- Docker target application
+- 2–3 fault types
+- Basic metrics
+- Basic experiment execution
+- Basic experiment results
+
+If the MVP can successfully:
+
+INJECT → OBSERVE → MEASURE → RECOVER
+
+then the fundamental FaultLab concept is working.
+
+============================================================
+20. FINAL VERSION
+============================================================
+
+The final project should aim to include:
+
+- Five core fault types
+- Real-time monitoring
+- Experiment history
+- Recovery measurement
+- Resilience evaluation
+- Configurable fault parameters
+- Safety/target validation
+- Comparative experiments
+- AWS deployment
+- Functional target application
+- Professional dashboard
+- Project documentation and research evaluation
+
+============================================================
+21. STRETCH GOALS
+============================================================
+
+Only implement these if the core project is stable:
+
+- Prometheus integration
+- Grafana integration
+- Automated experiment scheduling
+- Additional network fault types
+- More advanced network simulation
+- Automated resilience recommendations
+- Kubernetes support
+
+Stretch goals must NEVER delay or compromise the core project.
+
+============================================================
+22. DEVELOPMENT PRINCIPLE
+============================================================
+
+The project should be built incrementally.
+
+Recommended progression:
+
+1. Build basic target application
+2. Containerize target application
+3. Create FaultLab Flask backend
+4. Connect Flask to Docker
+5. Implement service failure experiment
+6. Implement basic metrics
+7. Build React dashboard
+8. Add real-time updates
+9. Add remaining fault types
+10. Add experiment history
+11. Add resilience comparison
+12. Add safety controls
+13. Deploy to AWS
+14. Perform structured experiments
+15. Document results
+
+Do not attempt to build every component simultaneously.
+
+============================================================
+23. DEMONSTRATION
+============================================================
+
+The core live demonstration should be possible within approximately
+2–3 minutes.
+
+Recommended demonstration:
+
+1. Show target application working normally.
+2. Show registered services as healthy.
+3. Start a FaultLab experiment.
+4. Inject a controlled fault.
+5. Show the target application's degradation.
+6. Show real-time metric changes.
+7. Recover the service.
+8. Show recovery time/result.
+
+The ideal demo story is:
+
+HEALTHY
+   ↓
+BREAK
+   ↓
+OBSERVE
+   ↓
+RECOVER
+   ↓
+ANALYZE
+
+The demo should focus on visible cause-and-effect rather than
+explaining every implementation detail.
+
+============================================================
+24. SAFETY
+============================================================
+
+FaultLab is intended for controlled experimentation.
+
+Experiments must operate only on isolated, registered Docker-based
+target environments.
+
+The system should not provide functionality intended to disrupt
+arbitrary external infrastructure.
+
+Experiments should have controlled duration/intensity and should
+include appropriate validation before execution.
+
+============================================================
+25. PROJECT TERMINOLOGY
+============================================================
+
+FaultLab:
+The overall chaos engineering and resilience testing platform.
+
+Target Application:
+The containerized application being tested.
+
+Experiment:
+A controlled fault-injection session.
+
+Fault:
+The controlled failure/condition introduced during an experiment.
+
+Baseline:
+System behavior measured before fault injection.
+
+Impact:
+The observed degradation caused by the fault.
+
+Recovery:
+The process through which the target returns toward normal behavior.
+
+Recovery Time:
+The measured time required for the target to recover after the
+fault is removed or the service is restored.
+
+Resilience:
+The ability of the application to continue operating acceptably
+and recover when failures occur.
+
+Fault Injection:
+The deliberate introduction of a controlled failure into the
+registered target environment.
+
+============================================================
+26. OFFICIAL ONE-LINE DESCRIPTION
+============================================================
+
+FaultLab is a web-based chaos engineering platform that provides
+controlled fault injection, real-time monitoring, and resilience
+assessment for isolated Docker-based applications.
+
+============================================================
+27. OFFICIAL SHORT DESCRIPTOR
+============================================================
+
+FaultLab — System Resilience Platform
+
+============================================================
+28. CORE PROJECT FORMULA
+============================================================
+
+FaultLab:
+
+CONTROLLED FAILURE
+        +
+REAL-TIME OBSERVABILITY
+        +
+MEASURABLE RECOVERY
+        +
+COMPARATIVE EXPERIMENTATION
+        =
+RESILIENCE ASSESSMENT
+
+============================================================
+END OF MASTER SPECIFICATION
+============================================================
