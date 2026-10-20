@@ -1,0 +1,116 @@
+services:
+  product-service:
+    build:
+      context: ./target-app/product-service
+      dockerfile: Dockerfile
+    environment:
+      - PORT=5001
+    expose:
+      - "5001"
+    networks:
+      - faultlab-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  inventory-service:
+    build:
+      context: ./target-app/inventory-service
+      dockerfile: Dockerfile
+    environment:
+      - PORT=5003
+    expose:
+      - "5003"
+    networks:
+      - faultlab-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5003/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  payment-service:
+    build:
+      context: ./target-app/payment-service
+      dockerfile: Dockerfile
+    environment:
+      - PORT=5004
+    expose:
+      - "5004"
+    networks:
+      - faultlab-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5004/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  order-service:
+    build:
+      context: ./target-app/order-service
+      dockerfile: Dockerfile
+    environment:
+      - PORT=5002
+      - PRODUCT_SERVICE_URL=http://product-service:5001
+      - INVENTORY_SERVICE_URL=http://inventory-service:5003
+      - PAYMENT_SERVICE_URL=http://payment-service:5004
+      - REQUEST_TIMEOUT=5.0
+    expose:
+      - "5002"
+    depends_on:
+      product-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+    networks:
+      - faultlab-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5002/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: ./target-app/api-gateway
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8000
+      - PRODUCT_SERVICE_URL=http://product-service:5001
+      - ORDER_SERVICE_URL=http://order-service:5002
+      - PAYMENT_SERVICE_URL=http://payment-service:5004
+      - GATEWAY_TIMEOUT=5.0
+    ports:
+      - "8000:8000"
+    depends_on:
+      product-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+    networks:
+      - faultlab-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+    restart: unless-stopped
+
+networks:
+  faultlab-network:
+    driver: bridge
