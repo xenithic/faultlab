@@ -53,4 +53,13 @@ def create_app(config_name: str | None = None) -> Flask:
             "message": "An unexpected error occurred on the FaultLab platform backend."
         }), 500
 
+    # Safely reconcile any orphaned running experiments on application startup
+    try:
+        with app.app_context():
+            from .services import reconcile_orphaned_experiments
+            reconcile_orphaned_experiments(app)
+    except Exception:
+        # Database tables may not be created yet during initial migration or test setup
+        pass
+
     return app

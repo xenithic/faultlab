@@ -21,6 +21,21 @@ class DockerUnavailableError(Exception):
     pass
 
 
+class ContainerSecurityError(Exception):
+    """Raised when an operation targets an unauthorized or protected container."""
+    pass
+
+
+class ContainerNotFoundError(Exception):
+    """Raised when a specified container is not found on the host."""
+    pass
+
+
+class ContainerStateError(Exception):
+    """Raised when a container is in an incompatible state for the requested operation."""
+    pass
+
+
 def get_docker_client() -> docker.DockerClient | None:
     """
     Safely obtain a Docker client instance.
@@ -284,3 +299,184 @@ class DockerService:
         }
 
         return True, None, container_info
+
+    def get_validated_container(
+        self,
+        container_id: str,
+        expected_compose_project: str | None = None,
+        expected_service_name: str | None = None
+    ) -> Any:
+        """
+        Retrieve and validate a Docker container by its ID.
+        Strictly enforces:
+        1. Container exists and can be inspected.
+        2. Container has generic opt-in label 'faultlab.target=true'.
+        3. Container is NOT labeled or named as platform infrastructure ('faultlab.platform=true' or in PROTECTED_SERVICES).
+        4. If expected_compose_project is specified, container's compose project must match.
+        5. If expected_service_name is specified, container's compose service must match.
+        Raises ContainerSecurityError, ContainerNotFoundError, or DockerUnavailableError.
+        """
+        try:
+            container = self.client.containers.get(container_id)
+            container.reload()
+        except docker.errors.NotFound:
+            raise ContainerNotFoundError(f"Container '{container_id}' was not found on the Docker host.")
+        except DockerException as e:
+            raise DockerUnavailableError(f"Docker API error accessing container '{container_id}': {str(e)}") from e
+
+        labels = container.labels or {}
+        c_name = container.name
+        c_service = labels.get("com.docker.compose.service", "")
+        c_project = labels.get("com.docker.compose.project", "")
+
+        # 1. Platform protection check
+        is_platform_labeled = str(labels.get(PLATFORM_LABEL, "")).lower() == "true"
+        is_protected_name = c_service.lower() in PROTECTED_SERVICES or any(
+            p in c_name.lower() for p in PROTECTED_SERVICES
+        )
+        if is_platform_labeled or is_protected_name:
+            raise ContainerSecurityError(
+                f"Container '{c_name}' ({container_id[:12]}) is protected platform infrastructure and cannot be operated on."
+            )
+
+        # 2. Opt-in check
+        opt_in = str(labels.get(TARGET_OPT_IN_LABEL, "")).lower() == TARGET_OPT_IN_VALUE
+        if not opt_in:
+            raise ContainerSecurityError(
+                f"Container '{c_name}' ({container_id[:12]}) is missing required opt-in label '{TARGET_OPT_IN_LABEL}={TARGET_OPT_IN_VALUE}'."
+            )
+
+        # 3. Project check
+        if expected_compose_project and c_project != expected_compose_project:
+            raise ContainerSecurityError(
+                f"Container '{c_name}' belongs to project '{c_project}', expected '{expected_compose_project}'."
+            )
+
+        # 4. Service check
+        if expected_service_name and c_service != expected_service_name:
+            raise ContainerSecurityError(
+                f"Container '{c_name}' belongs to service '{c_service}', expected '{expected_service_name}'."
+            )
+
+        return container
+
+    def _assert_container_safety(self, container: Any, operation: str) -> None:
+        """Enforce safety invariant check on any container before lifecycle modification."""
+        labels = container.labels or {}
+        c_name = container.name
+        c_service = labels.get("com.docker.compose.service", "")
+
+        is_platform = str(labels.get(PLATFORM_LABEL, "")).lower() == "true"
+        is_protected = c_service.lower() in PROTECTED_SERVICES or any(
+            p in c_name.lower() for p in PROTECTED_SERVICES
+        )
+        if is_platform or is_protected:
+            raise ContainerSecurityError(
+                f"Cannot {operation} protected platform infrastructure container '{c_name}'."
+            )
+
+        opt_in = str(labels.get(TARGET_OPT_IN_LABEL, "")).lower() == TARGET_OPT_IN_VALUE
+        if not opt_in:
+            raise ContainerSecurityError(
+                f"Cannot {operation} container '{c_name}': missing opt-in label '{TARGET_OPT_IN_LABEL}={TARGET_OPT_IN_VALUE}'."
+            )
+
+    def stop_container(self, container: Any, timeout: int = 5) -> None:
+        """Safely stop a validated target container."""
+        self._assert_container_safety(container, "stop")
+        try:
+            container.stop(timeout=timeout)
+            container.reload()
+        except DockerException as e:
+            raise DockerUnavailableError(f"Failed to stop container {container.short_id}: {str(e)}") from e
+
+    def start_container(self, container: Any) -> None:
+        """Safely start a validated target container."""
+        self._assert_container_safety(container, "start")
+        try:
+            container.start()
+            container.reload()
+        except DockerException as e:
+            raise DockerUnavailableError(f"Failed to start container {container.short_id}: {str(e)}") from e
+
+    def pause_container(self, container: Any) -> None:
+        """Safely pause a validated target container."""
+        self._assert_container_safety(container, "pause")
+        try:
+            container.pause()
+            container.reload()
+        except DockerException as e:
+            raise DockerUnavailableError(f"Failed to pause container {container.short_id}: {str(e)}") from e
+
+    def unpause_container(self, container: Any) -> None:
+        """Safely unpause a validated target container."""
+        self._assert_container_safety(container, "unpause")
+        try:
+            container.unpause()
+            container.reload()
+        except DockerException as e:
+            raise DockerUnavailableError(f"Failed to unpause container {container.short_id}: {str(e)}") from e
+
+
+    def inspect_container_state(self, container: Any) -> dict[str, Any]:
+        """Inspect fresh container status, health, and attributes."""
+        try:
+            container.reload()
+            state = container.attrs.get("State", {})
+            health = state.get("Health", {}).get("Status", "none")
+            return {
+                "container_id": container.id,
+                "container_short_id": container.short_id,
+                "container_name": container.name,
+                "status": container.status,
+                "health": health,
+                "running": state.get("Running", False),
+                "paused": state.get("Paused", False),
+                "restart_count": container.attrs.get("RestartCount", 0),
+            }
+        except Exception as e:
+            return {
+                "container_id": getattr(container, "id", "unknown"),
+                "status": "unreachable",
+                "health": "unknown",
+                "error": str(e),
+            }
+
+    def get_container_stats(self, container: Any) -> dict[str, Any]:
+        """Fetch a single non-streaming snapshot of real container resource stats."""
+        try:
+            stats = container.stats(stream=False)
+            cpu_stats = stats.get("cpu_stats", {})
+            precpu_stats = stats.get("precpu_stats", {})
+            cpu_usage = cpu_stats.get("cpu_usage", {}).get("total_usage", 0)
+            precpu_usage = precpu_stats.get("cpu_usage", {}).get("total_usage", 0)
+            system_cpu = cpu_stats.get("system_cpu_usage", 0)
+            system_precpu = precpu_stats.get("system_cpu_usage", 0)
+
+            cpu_percent = 0.0
+            cpu_delta = cpu_usage - precpu_usage
+            system_delta = system_cpu - system_precpu
+            online_cpus = cpu_stats.get("online_cpus", len(cpu_stats.get("cpu_usage", {}).get("percpu_usage", []) or [1]))
+
+            if system_delta > 0 and cpu_delta > 0:
+                cpu_percent = round((cpu_delta / system_delta) * online_cpus * 100.0, 2)
+
+            mem_stats = stats.get("memory_stats", {})
+            mem_usage_bytes = mem_stats.get("usage", 0)
+            mem_limit_bytes = mem_stats.get("limit", 0)
+            mem_percent = 0.0
+            if mem_limit_bytes > 0:
+                mem_percent = round((mem_usage_bytes / mem_limit_bytes) * 100.0, 2)
+
+            return {
+                "available": True,
+                "cpu_percent": cpu_percent,
+                "memory_usage_bytes": mem_usage_bytes,
+                "memory_limit_bytes": mem_limit_bytes,
+                "memory_percent": mem_percent,
+            }
+        except Exception as e:
+            return {
+                "available": False,
+                "reason": f"Stats collection unavailable: {str(e)}"
+            }
