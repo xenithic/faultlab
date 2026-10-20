@@ -5,10 +5,16 @@ import unittest
 from unittest.mock import MagicMock, patch
 import requests
 
-# Ensure target-app/api-gateway is on sys.path
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+import importlib.util
 
-from app import app
+# Load API Gateway app module under a unique name to prevent collision in sys.modules
+_SERVICE_DIR = os.path.abspath(os.path.dirname(__file__))
+_spec = importlib.util.spec_from_file_location("api_gateway_app", os.path.join(_SERVICE_DIR, "app.py"))
+api_gateway_app = importlib.util.module_from_spec(_spec)
+sys.modules["api_gateway_app"] = api_gateway_app
+_spec.loader.exec_module(api_gateway_app)
+
+app = api_gateway_app.app
 
 
 class ApiGatewayTestCase(unittest.TestCase):
@@ -30,7 +36,7 @@ class ApiGatewayTestCase(unittest.TestCase):
         self.assertEqual(data_health.get("service"), "api-gateway")
 
     # 2. Product listing forwarding
-    @patch("app.requests.request")
+    @patch("api_gateway_app.requests.request")
     def test_products_listing(self, mock_request):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -48,7 +54,7 @@ class ApiGatewayTestCase(unittest.TestCase):
         self.assertTrue(kwargs["url"].endswith("/products"))
 
     # 3. Product search with query parameter forwarding
-    @patch("app.requests.request")
+    @patch("api_gateway_app.requests.request")
     def test_products_search_with_params(self, mock_request):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -67,7 +73,7 @@ class ApiGatewayTestCase(unittest.TestCase):
         self.assertEqual(kwargs["params"].get("category"), "Electronics")
 
     # 4. Product details by ID forwarding
-    @patch("app.requests.request")
+    @patch("api_gateway_app.requests.request")
     def test_product_by_id(self, mock_request):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -85,7 +91,7 @@ class ApiGatewayTestCase(unittest.TestCase):
         self.assertTrue(kwargs["url"].endswith("/products/prod-1"))
 
     # 5. Order creation forwarding with JSON body
-    @patch("app.requests.request")
+    @patch("api_gateway_app.requests.request")
     def test_order_creation_forwarding(self, mock_request):
         mock_resp = MagicMock()
         mock_resp.status_code = 201
@@ -112,7 +118,7 @@ class ApiGatewayTestCase(unittest.TestCase):
         self.assertEqual(kwargs["json"], payload)
 
     # 6. Order listing and retrieval forwarding
-    @patch("app.requests.request")
+    @patch("api_gateway_app.requests.request")
     def test_order_listing_and_retrieval(self, mock_request):
         # Listing
         mock_resp = MagicMock()
@@ -137,7 +143,7 @@ class ApiGatewayTestCase(unittest.TestCase):
         self.assertEqual(res_detail.get_json()["order_id"], "ord-1")
 
     # 7. Payment listing and detail forwarding (GET only)
-    @patch("app.requests.request")
+    @patch("api_gateway_app.requests.request")
     def test_payment_listing_and_detail(self, mock_request):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -175,7 +181,7 @@ class ApiGatewayTestCase(unittest.TestCase):
         self.assertEqual(res_reserve.status_code, 404)
 
     # 10. Status code preservation (400, 402, 404)
-    @patch("app.requests.request")
+    @patch("api_gateway_app.requests.request")
     def test_status_code_preservation(self, mock_request):
         # Case 1: 400 Bad Request
         mock_400 = MagicMock()
@@ -211,7 +217,7 @@ class ApiGatewayTestCase(unittest.TestCase):
         self.assertEqual(res_404.get_json()["error"], "Product not found")
 
     # 11. Downstream connection failure returns 503
-    @patch("app.requests.request")
+    @patch("api_gateway_app.requests.request")
     def test_downstream_connection_error(self, mock_request):
         mock_request.side_effect = requests.exceptions.ConnectionError("Connection refused")
 
@@ -223,7 +229,7 @@ class ApiGatewayTestCase(unittest.TestCase):
         self.assertIn("Could not connect", data["details"])
 
     # 12. Downstream timeout returns 504
-    @patch("app.requests.request")
+    @patch("api_gateway_app.requests.request")
     def test_downstream_timeout(self, mock_request):
         mock_request.side_effect = requests.exceptions.Timeout("Read timed out")
 
@@ -242,7 +248,7 @@ class ApiGatewayTestCase(unittest.TestCase):
         self.assertEqual(data["error"], "Not found")
 
     # 14. Hop-by-hop headers filtering and clean response headers
-    @patch("app.requests.request")
+    @patch("api_gateway_app.requests.request")
     def test_header_filtering(self, mock_request):
         mock_resp = MagicMock()
         mock_resp.status_code = 200

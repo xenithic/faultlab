@@ -4,10 +4,19 @@ import unittest
 from unittest.mock import MagicMock, patch
 import requests
 
-# Ensure target-app/order-service is on sys.path
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+import importlib.util
 
-from app import app, ORDERS, STATUS_CONFIRMED, STATUS_FAILED
+# Load Order Service app module under a unique name to prevent collision in sys.modules
+_SERVICE_DIR = os.path.abspath(os.path.dirname(__file__))
+_spec = importlib.util.spec_from_file_location("order_service_app", os.path.join(_SERVICE_DIR, "app.py"))
+order_service_app = importlib.util.module_from_spec(_spec)
+sys.modules["order_service_app"] = order_service_app
+_spec.loader.exec_module(order_service_app)
+
+app = order_service_app.app
+ORDERS = order_service_app.ORDERS
+STATUS_CONFIRMED = order_service_app.STATUS_CONFIRMED
+STATUS_FAILED = order_service_app.STATUS_FAILED
 
 
 class OrderServiceTestCase(unittest.TestCase):
@@ -33,8 +42,8 @@ class OrderServiceTestCase(unittest.TestCase):
         self.assertEqual(data_health.get("service"), "order-service")
 
     # 2. Successful order creation and downstream verification
-    @patch("app.requests.post")
-    @patch("app.requests.get")
+    @patch("order_service_app.requests.post")
+    @patch("order_service_app.requests.get")
     def test_successful_order_creation(self, mock_get, mock_post):
         # Product mock
         mock_prod_resp = MagicMock()
@@ -108,8 +117,8 @@ class OrderServiceTestCase(unittest.TestCase):
         self.assertEqual(ORDERS[order_id]["status"], STATUS_CONFIRMED)
 
     # 3. Invalid or missing order request fields
-    @patch("app.requests.get")
-    @patch("app.requests.post")
+    @patch("order_service_app.requests.get")
+    @patch("order_service_app.requests.post")
     def test_invalid_or_missing_order_fields(self, mock_post, mock_get):
         # Non-JSON content type
         res = self.client.post("/orders", data="not json", content_type="text/plain")
@@ -157,8 +166,8 @@ class OrderServiceTestCase(unittest.TestCase):
         self.assertEqual(len(ORDERS), 0)
 
     # 4. Product not found
-    @patch("app.requests.post")
-    @patch("app.requests.get")
+    @patch("order_service_app.requests.post")
+    @patch("order_service_app.requests.get")
     def test_product_not_found(self, mock_get, mock_post):
         mock_resp = MagicMock()
         mock_resp.status_code = 404
@@ -176,8 +185,8 @@ class OrderServiceTestCase(unittest.TestCase):
         self.assertEqual(len(ORDERS), 0)
 
     # 5. Product service unavailable / timeout
-    @patch("app.requests.post")
-    @patch("app.requests.get")
+    @patch("order_service_app.requests.post")
+    @patch("order_service_app.requests.get")
     def test_product_service_unavailable(self, mock_get, mock_post):
         mock_get.side_effect = requests.exceptions.Timeout("Connection timed out")
 
@@ -190,8 +199,8 @@ class OrderServiceTestCase(unittest.TestCase):
         self.assertEqual(len(ORDERS), 0)
 
     # 6. Inventory reservation failure: payment must not be called
-    @patch("app.requests.post")
-    @patch("app.requests.get")
+    @patch("order_service_app.requests.post")
+    @patch("order_service_app.requests.get")
     def test_inventory_reservation_failure_insufficient_stock(self, mock_get, mock_post):
         # Product mock
         mock_prod_resp = MagicMock()
@@ -228,8 +237,8 @@ class OrderServiceTestCase(unittest.TestCase):
         self.assertEqual(ORDERS[order_id]["status"], STATUS_FAILED)
 
     # 7. Inventory service unavailable / timed out
-    @patch("app.requests.post")
-    @patch("app.requests.get")
+    @patch("order_service_app.requests.post")
+    @patch("order_service_app.requests.get")
     def test_inventory_service_unavailable(self, mock_get, mock_post):
         mock_prod_resp = MagicMock()
         mock_prod_resp.status_code = 200
@@ -249,8 +258,8 @@ class OrderServiceTestCase(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 1)
 
     # 8. Payment failure after successful reservation
-    @patch("app.requests.post")
-    @patch("app.requests.get")
+    @patch("order_service_app.requests.post")
+    @patch("order_service_app.requests.get")
     def test_payment_failure_after_reservation(self, mock_get, mock_post):
         mock_prod_resp = MagicMock()
         mock_prod_resp.status_code = 200
@@ -289,8 +298,8 @@ class OrderServiceTestCase(unittest.TestCase):
         self.assertEqual(ORDERS[order_id]["status"], STATUS_FAILED)
 
     # 9. Payment service unavailable / timed out
-    @patch("app.requests.post")
-    @patch("app.requests.get")
+    @patch("order_service_app.requests.post")
+    @patch("order_service_app.requests.get")
     def test_payment_service_timeout(self, mock_get, mock_post):
         mock_prod_resp = MagicMock()
         mock_prod_resp.status_code = 200
@@ -344,8 +353,8 @@ class OrderServiceTestCase(unittest.TestCase):
         self.assertEqual(orders_list[0]["order_id"], "ord-test1234")
 
     # 11. Handling downstream unexpected responses (malformed JSON, 500 status codes)
-    @patch("app.requests.post")
-    @patch("app.requests.get")
+    @patch("order_service_app.requests.post")
+    @patch("order_service_app.requests.get")
     def test_unexpected_downstream_responses(self, mock_get, mock_post):
         # Case A: Product service returns 500 Internal Server Error
         mock_prod_500 = MagicMock()
