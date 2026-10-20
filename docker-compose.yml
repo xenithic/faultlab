@@ -1,10 +1,16 @@
 services:
+  # ============================================================================
+  # Target Application Microservices (Controlled Subjects for Resilience Tests)
+  # Generic opt-in label: faultlab.target=true marks services eligible for testing
+  # ============================================================================
   product-service:
     build:
       context: ./target-app/product-service
       dockerfile: Dockerfile
     environment:
       - PORT=5001
+    labels:
+      - "faultlab.target=true"
     expose:
       - "5001"
     networks:
@@ -23,6 +29,8 @@ services:
       dockerfile: Dockerfile
     environment:
       - PORT=5003
+    labels:
+      - "faultlab.target=true"
     expose:
       - "5003"
     networks:
@@ -41,6 +49,8 @@ services:
       dockerfile: Dockerfile
     environment:
       - PORT=5004
+    labels:
+      - "faultlab.target=true"
     expose:
       - "5004"
     networks:
@@ -63,6 +73,8 @@ services:
       - INVENTORY_SERVICE_URL=http://inventory-service:5003
       - PAYMENT_SERVICE_URL=http://payment-service:5004
       - REQUEST_TIMEOUT=5.0
+    labels:
+      - "faultlab.target=true"
     expose:
       - "5002"
     depends_on:
@@ -92,6 +104,8 @@ services:
       - ORDER_SERVICE_URL=http://order-service:5002
       - PAYMENT_SERVICE_URL=http://payment-service:5004
       - GATEWAY_TIMEOUT=5.0
+    labels:
+      - "faultlab.target=true"
     ports:
       - "8000:8000"
     depends_on:
@@ -111,6 +125,67 @@ services:
       start_period: 3s
     restart: unless-stopped
 
+  # ============================================================================
+  # FaultLab Platform Infrastructure
+  # Explicitly labeled as platform components (never eligible as fault targets)
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    labels:
+      - "faultlab.platform=true"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-faultlab_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-faultlab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-faultlab_dev_password}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - faultlab-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-faultlab} -d ${POSTGRES_DB:-faultlab_platform}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  faultlab-platform:
+    build:
+      context: ./platform
+      dockerfile: Dockerfile
+    labels:
+      - "faultlab.platform=true"
+    environment:
+      - FLASK_APP=run.py
+      - FLASK_ENV=${FLASK_ENV:-development}
+      - PORT=5050
+      - POSTGRES_USER=${POSTGRES_USER:-faultlab}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-faultlab_dev_password}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-faultlab_platform}
+    ports:
+      - "${PORT:-5050}:5050"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - faultlab-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5050/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
 networks:
   faultlab-network:
     driver: bridge
+
+volumes:
+  postgres_data:

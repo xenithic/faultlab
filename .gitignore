@@ -11,6 +11,11 @@ venv/
 # Environment variables
 .env
 .env.local
+*.env
+
+# SQLite / Local Databases
+*.db
+*.sqlite3
 
 # IDEs
 .idea/
