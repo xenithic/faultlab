@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any
 import docker
 from docker.errors import DockerException
@@ -14,6 +15,14 @@ PLATFORM_LABEL = "faultlab.platform"
 
 # Names and services explicitly protected from resilience testing
 PROTECTED_SERVICES = {"postgres", "faultlab-platform"}
+
+SERVICE_PORTS = {
+    "product-service": 5001,
+    "order-service": 5002,
+    "inventory-service": 5003,
+    "payment-service": 5004,
+    "api-gateway": 8000,
+}
 
 
 class DockerUnavailableError(Exception):
@@ -397,6 +406,9 @@ class DockerService:
             container.start()
             container.reload()
         except DockerException as e:
+            if "already started" in str(e).lower():
+                container.reload()
+                return
             raise DockerUnavailableError(f"Failed to start container {container.short_id}: {str(e)}") from e
 
     def pause_container(self, container: Any) -> None:
@@ -415,8 +427,10 @@ class DockerService:
             container.unpause()
             container.reload()
         except DockerException as e:
+            if "not paused" in str(e).lower():
+                container.reload()
+                return
             raise DockerUnavailableError(f"Failed to unpause container {container.short_id}: {str(e)}") from e
-
 
     def inspect_container_state(self, container: Any) -> dict[str, Any]:
         """Inspect fresh container status, health, and attributes."""
@@ -433,12 +447,16 @@ class DockerService:
                 "running": state.get("Running", False),
                 "paused": state.get("Paused", False),
                 "restart_count": container.attrs.get("RestartCount", 0),
+                "exit_code": state.get("ExitCode", 0),
             }
         except Exception as e:
             return {
                 "container_id": getattr(container, "id", "unknown"),
                 "status": "unreachable",
                 "health": "unknown",
+                "running": False,
+                "paused": False,
+                "exit_code": None,
                 "error": str(e),
             }
 
@@ -480,3 +498,197 @@ class DockerService:
                 "available": False,
                 "reason": f"Stats collection unavailable: {str(e)}"
             }
+
+    def inject_resource_stress(
+        self,
+        container: Any,
+        stress_type: str = "cpu",
+        cpu_workers: int = 1,
+        cpu_load: int = 80,
+        memory_workers: int = 1,
+        memory_bytes: str = "128M",
+        duration_seconds: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Safely start bounded resource stress inside an authorized target container.
+        Checks for stress-ng binary, falling back to python stress worker.
+        """
+        self._assert_container_safety(container, "stress")
+        try:
+            res = container.exec_run("which stress-ng")
+            has_stress_ng = (res.exit_code == 0)
+        except Exception:
+            has_stress_ng = False
+
+        if has_stress_ng:
+            cmd_parts = ["stress-ng"]
+            if stress_type in ("cpu", "both"):
+                cmd_parts.extend(["--cpu", str(cpu_workers), "--cpu-load", str(cpu_load)])
+            if stress_type in ("memory", "both"):
+                cmd_parts.extend(["--vm", str(memory_workers), "--vm-bytes", str(memory_bytes)])
+            cmd_parts.extend(["--timeout", f"{int(duration_seconds)}s"])
+            cmd = " ".join(cmd_parts)
+            tool = "stress-ng"
+        else:
+            cmd = (
+                f"python /app/faultlab_stress.py --type {stress_type} "
+                f"--cpu {cpu_workers} --load {cpu_load} --memory {memory_bytes} "
+                f"--duration {duration_seconds}"
+            )
+            tool = "python"
+
+        try:
+            container.exec_run(cmd, detach=True)
+            return {"started": True, "tool": tool, "command": cmd}
+        except DockerException as e:
+            raise DockerUnavailableError(f"Failed to start resource stress: {str(e)}") from e
+
+    def stop_resource_stress(self, container: Any) -> None:
+        """Terminate all stress processes inside the container."""
+        self._assert_container_safety(container, "stop_stress")
+        try:
+            container.exec_run("pkill -9 -f stress-ng")
+            container.exec_run("pkill -9 -f faultlab_stress")
+        except Exception as e:
+            logger.warning(
+                "Error stopping stress processes on container %s: %s",
+                getattr(container, "short_id", "unknown"),
+                e,
+            )
+
+    def verify_resource_stress_stopped(self, container: Any) -> bool:
+        """Verify that stress processes have completely terminated (excluding reaped zombie/defunct records)."""
+        try:
+            # Check for active (non-defunct) stress processes
+            check_cmd = (
+                "python -c \""
+                "import os, glob; "
+                "active = []; "
+                "[active.append(p) for p in glob.glob('/proc/[0-9]*/status') "
+                "if any(n in open(p).read() for n in ('stress-ng', 'faultlab_stress')) "
+                "and 'State:\tZ' not in open(p).read()]; "
+                "print(len(active))\""
+            )
+            res = container.exec_run(check_cmd)
+            output = res.output.decode("utf-8", errors="replace").strip() if hasattr(res.output, "decode") else str(res.output).strip()
+            if res.exit_code == 0:
+                count = int(output.splitlines()[-1])
+                return count == 0
+            # Fallback to awk
+            fallback_cmd = "sh -c \"ps -eo stat,comm | awk '$1 !~ /^Z/ && ($2 ~ /stress-ng/ || $2 ~ /faultlab_stress/) {print $0}'\""
+            fallback_res = container.exec_run(fallback_cmd)
+            fb_output = fallback_res.output.decode("utf-8", errors="replace").strip() if hasattr(fallback_res.output, "decode") else str(fallback_res.output).strip()
+            return len(fb_output) == 0
+        except Exception:
+            return True
+
+    def inject_http_fault(
+        self,
+        container: Any,
+        service_name: str,
+        fault_type: str,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Inject application-layer fault (latency or http_error) into target container's interceptor.
+        Executes via loopback inside container network namespace for guaranteed reachability.
+        """
+        self._assert_container_safety(container, "inject_fault")
+        port = SERVICE_PORTS.get(service_name, 5000)
+        secret = os.environ.get("FAULTLAB_CONTROL_SECRET", "faultlab-internal-control-secret")
+        payload = {
+            "fault_type": fault_type,
+            "duration_seconds": parameters.get("duration_seconds", 10),
+            "latency_ms": parameters.get("latency_ms", parameters.get("delay_ms", 500)),
+            "jitter_ms": parameters.get("jitter_ms", 0),
+            "error_code": parameters.get("error_code", 500),
+            "error_rate": parameters.get("error_rate", 1.0),
+            "error_message": parameters.get("error_message", "Injected HTTP failure from FaultLab"),
+            "secret": secret,
+        }
+        import json
+        payload_json = json.dumps(payload)
+
+        script = (
+            f"import urllib.request, json\n"
+            f"req = urllib.request.Request(\n"
+            f"    'http://127.0.0.1:{port}/_faultlab/fault',\n"
+            f"    data={payload_json!r}.encode('utf-8'),\n"
+            f"    headers={{'Content-Type': 'application/json', 'X-FaultLab-Secret': '{secret}'}},\n"
+            f"    method='POST'\n"
+            f")\n"
+            f"with urllib.request.urlopen(req, timeout=3) as r:\n"
+            f"    print(r.read().decode())\n"
+        )
+        try:
+            res = container.exec_run(["python", "-c", script])
+            output = res.output.decode("utf-8", errors="replace") if hasattr(res.output, "decode") else str(res.output)
+            if res.exit_code == 0:
+                try:
+                    return json.loads(output.strip())
+                except Exception:
+                    return {"active": True, "output": output}
+            else:
+                raise DockerUnavailableError(f"HTTP fault injection failed (exit {res.exit_code}): {output}")
+        except DockerException as e:
+            raise DockerUnavailableError(f"Failed to execute fault injection script: {str(e)}") from e
+
+    def remove_http_fault(self, container: Any, service_name: str) -> dict[str, Any]:
+        """Clear injected HTTP/network fault on the target service."""
+        self._assert_container_safety(container, "remove_fault")
+        port = SERVICE_PORTS.get(service_name, 5000)
+        secret = os.environ.get("FAULTLAB_CONTROL_SECRET", "faultlab-internal-control-secret")
+        import json
+        payload_json = json.dumps({"active": False, "secret": secret})
+
+        script = (
+            f"import urllib.request, json\n"
+            f"req = urllib.request.Request(\n"
+            f"    'http://127.0.0.1:{port}/_faultlab/fault',\n"
+            f"    data={payload_json!r}.encode('utf-8'),\n"
+            f"    headers={{'Content-Type': 'application/json', 'X-FaultLab-Secret': '{secret}'}},\n"
+            f"    method='POST'\n"
+            f")\n"
+            f"with urllib.request.urlopen(req, timeout=3) as r:\n"
+            f"    print(r.read().decode())\n"
+        )
+        try:
+            res = container.exec_run(["python", "-c", script])
+            output = res.output.decode("utf-8", errors="replace") if hasattr(res.output, "decode") else str(res.output)
+            if res.exit_code == 0:
+                try:
+                    return json.loads(output.strip())
+                except Exception:
+                    return {"active": False, "status": "recovered"}
+            else:
+                return {"active": False, "status": "cleared_with_warning", "output": output}
+        except Exception as e:
+            logger.warning(
+                "Error removing HTTP fault on container %s: %s",
+                getattr(container, "short_id", "unknown"),
+                e,
+            )
+            return {"active": False, "error": str(e)}
+
+    def get_http_fault_status(self, container: Any, service_name: str) -> dict[str, Any]:
+        """Query current fault status from target service's interceptor."""
+        port = SERVICE_PORTS.get(service_name, 5000)
+        secret = os.environ.get("FAULTLAB_CONTROL_SECRET", "faultlab-internal-control-secret")
+        import json
+        script = (
+            f"import urllib.request\n"
+            f"req = urllib.request.Request('http://127.0.0.1:{port}/_faultlab/fault', headers={{'X-FaultLab-Secret': '{secret}'}})\n"
+            f"with urllib.request.urlopen(req, timeout=3) as r:\n"
+            f"    print(r.read().decode())\n"
+        )
+        try:
+            res = container.exec_run(["python", "-c", script])
+            output = res.output.decode("utf-8", errors="replace") if hasattr(res.output, "decode") else str(res.output)
+            if res.exit_code == 0:
+                try:
+                    return json.loads(output.strip())
+                except Exception:
+                    return {"active": False}
+            return {"active": False, "error": output}
+        except Exception:
+            return {"active": False}

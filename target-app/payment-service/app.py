@@ -5,6 +5,9 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
+from fault_interceptor import init_fault_interceptor
+init_fault_interceptor(app)
+
 # In-memory storage for processed payment transactions
 PAYMENTS = {}
 

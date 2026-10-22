@@ -1,7 +1,11 @@
 import os
+# pyrefly: ignore [missing-import]
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+
+from fault_interceptor import init_fault_interceptor
+init_fault_interceptor(app)
 
 # In-memory realistic product catalog for the initial development stage
 PRODUCTS = [

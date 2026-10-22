@@ -6,6 +6,9 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
+from fault_interceptor import init_fault_interceptor
+init_fault_interceptor(app)
+
 # Service Base URLs (configurable via environment variables for local dev / Docker)
 PRODUCT_SERVICE_URL = os.environ.get("PRODUCT_SERVICE_URL", "http://localhost:5001").rstrip("/")
 INVENTORY_SERVICE_URL = os.environ.get("INVENTORY_SERVICE_URL", "http://localhost:5003").rstrip("/")

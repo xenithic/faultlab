@@ -17,12 +17,15 @@ from .docker_service import (
 logger = logging.getLogger(__name__)
 
 # Supported and deferred fault types
-SUPPORTED_FAULT_TYPES = {"service_failure", "service_pause"}
-DEFERRED_FAULT_TYPES = {
-    "latency": "Deferred: Requires Toxiproxy sidecar or traffic interceptor in Docker network topology.",
-    "resource_stress": "Deferred: Requires 'stress-ng' binary in target container image and cgroup configuration.",
-    "http_error": "Deferred: Requires application-level HTTP proxy or interceptor proxy.",
+# Supported fault types: all 5 core categories from Specification Section 7
+SUPPORTED_FAULT_TYPES = {
+    "service_failure",
+    "service_pause",
+    "latency",
+    "resource_stress",
+    "http_error",
 }
+DEFERRED_FAULT_TYPES: dict[str, str] = {}
 
 # Bounds on duration and timeouts
 MIN_DURATION_SECONDS = 1
@@ -34,6 +37,32 @@ MAX_STOP_TIMEOUT = 30
 DEFAULT_STOP_TIMEOUT = 5
 
 RECOVERY_VERIFICATION_TIMEOUT = 15.0  # seconds
+
+# Latency parameter bounds
+MIN_LATENCY_MS = 10
+MAX_LATENCY_MS = 10000
+DEFAULT_LATENCY_MS = 500
+
+# HTTP Error parameter bounds
+VALID_HTTP_ERROR_CODES = {400, 404, 429, 500, 502, 503, 504}
+DEFAULT_HTTP_ERROR_CODE = 500
+MIN_ERROR_RATE = 0.01
+MAX_ERROR_RATE = 1.0
+DEFAULT_ERROR_RATE = 1.0
+
+# Resource stress parameter bounds
+VALID_STRESS_TYPES = {"cpu", "memory", "both"}
+DEFAULT_STRESS_TYPE = "cpu"
+MIN_CPU_WORKERS = 1
+MAX_CPU_WORKERS = 4
+DEFAULT_CPU_WORKERS = 1
+MIN_CPU_LOAD = 1
+MAX_CPU_LOAD = 100
+DEFAULT_CPU_LOAD = 80
+MIN_MEMORY_WORKERS = 1
+MAX_MEMORY_WORKERS = 2
+DEFAULT_MEMORY_WORKERS = 1
+DEFAULT_MEMORY_BYTES = "128M"
 
 
 class ExecutionConflictError(Exception):
@@ -49,7 +78,7 @@ class ParameterValidationError(Exception):
 def validate_experiment_parameters(fault_type: str, parameters: dict[str, Any] | None) -> dict[str, Any]:
     """
     Validate and sanitize experiment parameters on the server.
-    Enforces hard limits on duration and intensity.
+    Enforces hard limits on duration and intensity across all fault types.
     """
     params = dict(parameters or {})
 
@@ -101,33 +130,146 @@ def validate_experiment_parameters(fault_type: str, parameters: dict[str, Any] |
         params["stop_timeout"] = stop_timeout
 
     elif fault_type == "service_pause":
-        # service_pause needs only duration_seconds
         pass
+
+    elif fault_type == "latency":
+        raw_latency = params.get("latency_ms", params.get("delay_ms", DEFAULT_LATENCY_MS))
+        try:
+            latency_ms = int(raw_latency)
+        except (ValueError, TypeError):
+            raise ParameterValidationError(
+                f"'latency_ms' must be an integer, got {raw_latency!r}."
+            )
+        if latency_ms < MIN_LATENCY_MS or latency_ms > MAX_LATENCY_MS:
+            raise ParameterValidationError(
+                f"'latency_ms' must be between {MIN_LATENCY_MS} and {MAX_LATENCY_MS} ms. Received: {latency_ms}."
+            )
+        params["latency_ms"] = latency_ms
+
+        raw_jitter = params.get("jitter_ms", 0)
+        try:
+            jitter_ms = int(raw_jitter)
+        except (ValueError, TypeError):
+            raise ParameterValidationError(
+                f"'jitter_ms' must be an integer, got {raw_jitter!r}."
+            )
+        if jitter_ms < 0 or jitter_ms > latency_ms:
+            raise ParameterValidationError(
+                f"'jitter_ms' must be between 0 and {latency_ms} ms. Received: {jitter_ms}."
+            )
+        params["jitter_ms"] = jitter_ms
+
+    elif fault_type == "http_error":
+        raw_code = params.get("error_code", DEFAULT_HTTP_ERROR_CODE)
+        try:
+            error_code = int(raw_code)
+        except (ValueError, TypeError):
+            raise ParameterValidationError(
+                f"'error_code' must be an integer, got {raw_code!r}."
+            )
+        if error_code not in VALID_HTTP_ERROR_CODES:
+            raise ParameterValidationError(
+                f"'error_code' must be one of {sorted(VALID_HTTP_ERROR_CODES)}. Received: {error_code}."
+            )
+        params["error_code"] = error_code
+
+        raw_rate = params.get("error_rate", DEFAULT_ERROR_RATE)
+        try:
+            rate = float(raw_rate)
+            if rate > 1.0 and rate <= 100.0:
+                rate = rate / 100.0
+        except (ValueError, TypeError):
+            raise ParameterValidationError(
+                f"'error_rate' must be a numeric value, got {raw_rate!r}."
+            )
+        if rate < MIN_ERROR_RATE or rate > MAX_ERROR_RATE:
+            raise ParameterValidationError(
+                f"'error_rate' must be between {MIN_ERROR_RATE} and {MAX_ERROR_RATE}. Received: {rate}."
+            )
+        params["error_rate"] = rate
+
+        raw_msg = params.get("error_message", "FaultLab Injected HTTP Failure")
+        params["error_message"] = str(raw_msg)[:200]
+
+    elif fault_type == "resource_stress":
+        raw_type = str(params.get("stress_type", DEFAULT_STRESS_TYPE)).strip().lower()
+        if raw_type not in VALID_STRESS_TYPES:
+            raise ParameterValidationError(
+                f"'stress_type' must be one of {sorted(VALID_STRESS_TYPES)}. Received: {raw_type!r}."
+            )
+        params["stress_type"] = raw_type
+
+        raw_cpu_workers = params.get("cpu_workers", DEFAULT_CPU_WORKERS)
+        try:
+            cpu_workers = int(raw_cpu_workers)
+        except (ValueError, TypeError):
+            raise ParameterValidationError(f"'cpu_workers' must be an integer, got {raw_cpu_workers!r}.")
+        if cpu_workers < MIN_CPU_WORKERS or cpu_workers > MAX_CPU_WORKERS:
+            raise ParameterValidationError(
+                f"'cpu_workers' must be between {MIN_CPU_WORKERS} and {MAX_CPU_WORKERS}. Received: {cpu_workers}."
+            )
+        params["cpu_workers"] = cpu_workers
+
+        raw_cpu_load = params.get("cpu_load", DEFAULT_CPU_LOAD)
+        try:
+            cpu_load = int(raw_cpu_load)
+        except (ValueError, TypeError):
+            raise ParameterValidationError(f"'cpu_load' must be an integer, got {raw_cpu_load!r}.")
+        if cpu_load < MIN_CPU_LOAD or cpu_load > MAX_CPU_LOAD:
+            raise ParameterValidationError(
+                f"'cpu_load' must be between {MIN_CPU_LOAD} and {MAX_CPU_LOAD} percent. Received: {cpu_load}."
+            )
+        params["cpu_load"] = cpu_load
+
+        raw_mem_workers = params.get("memory_workers", DEFAULT_MEMORY_WORKERS)
+        try:
+            mem_workers = int(raw_mem_workers)
+        except (ValueError, TypeError):
+            raise ParameterValidationError(f"'memory_workers' must be an integer, got {raw_mem_workers!r}.")
+        if mem_workers < MIN_MEMORY_WORKERS or mem_workers > MAX_MEMORY_WORKERS:
+            raise ParameterValidationError(
+                f"'memory_workers' must be between {MIN_MEMORY_WORKERS} and {MAX_MEMORY_WORKERS}. Received: {mem_workers}."
+            )
+        params["memory_workers"] = mem_workers
+
+        raw_mem_bytes = str(params.get("memory_bytes", DEFAULT_MEMORY_BYTES)).strip()
+        params["memory_bytes"] = raw_mem_bytes
 
     return params
 
 
-def probe_service_http_health(container: Any, service_name: str) -> dict[str, Any]:
+# Primary application traffic routes by service
+SERVICE_PRIMARY_ROUTES = {
+    "product-service": "/products",
+    "order-service": "/orders",
+    "inventory-service": "/inventory",
+    "payment-service": "/payments",
+    "api-gateway": "/products",
+}
+
+# Service port mapping table for standard target application services
+SERVICE_PORTS = {
+    "product-service": 5001,
+    "order-service": 5002,
+    "inventory-service": 5003,
+    "payment-service": 5004,
+    "api-gateway": 8000,
+}
+
+
+def probe_service_http_health(container: Any, service_name: str, timeout: float = 2.0) -> dict[str, Any]:
     """
     Safely attempt a real HTTP health probe against the target service.
     Returns real measured latency and status code, or records unavailability without fabrication.
+    Tries direct HTTP first, followed by loopback probe inside container network namespace.
     """
-    # Service port mapping table for standard target application services
-    SERVICE_PORTS = {
-        "product-service": 5001,
-        "order-service": 5002,
-        "inventory-service": 5003,
-        "payment-service": 5004,
-        "api-gateway": 8000,
-    }
-
     port = SERVICE_PORTS.get(service_name)
     endpoints_to_try = []
 
     # 1. Check if container has a published host port
     try:
-        ports_dict = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-        for container_port_spec, host_bindings in ports_dict.items():
+        ports_dict = container.attrs.get("NetworkSettings", {}).get("Ports", {}) if hasattr(container, "attrs") else {}
+        for container_port_spec, host_bindings in (ports_dict or {}).items():
             if host_bindings:
                 for binding in host_bindings:
                     host_ip = binding.get("HostIp", "127.0.0.1")
@@ -147,7 +289,7 @@ def probe_service_http_health(container: Any, service_name: str) -> dict[str, An
     for url in endpoints_to_try:
         t0 = time.perf_counter()
         try:
-            resp = requests.get(url, timeout=1.0)
+            resp = requests.get(url, timeout=timeout)
             latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
             return {
                 "available": True,
@@ -156,14 +298,218 @@ def probe_service_http_health(container: Any, service_name: str) -> dict[str, An
                 "latency_ms": latency_ms,
                 "is_healthy": resp.status_code == 200,
             }
-        except requests.exceptions.RequestException as e:
-            # If connection failed, continue to next endpoint or return real failure
-            last_err = str(e)
+        except requests.exceptions.RequestException:
             continue
+
+    # 3. Fallback: execute loopback probe inside container network namespace
+    if port and container is not None and hasattr(container, "exec_run"):
+        try:
+            status = getattr(container, "status", "")
+            state = getattr(container, "attrs", {}).get("State", {})
+            if status == "paused" or state.get("Paused") is True:
+                return {
+                    "available": False,
+                    "reason": "Container is paused; cannot execute HTTP probe.",
+                    "status_code": None,
+                    "latency_ms": None,
+                    "is_healthy": False,
+                }
+        except Exception:
+            pass
+
+        script = (
+            f"import urllib.request, time\n"
+            f"t0 = time.perf_counter()\n"
+            f"try:\n"
+            f"    with urllib.request.urlopen('http://127.0.0.1:{port}/health', timeout={timeout}) as r:\n"
+            f"        code = r.status\n"
+            f"        lat = round((time.perf_counter() - t0) * 1000.0, 2)\n"
+            f"        print(f'OK:{{code}}:{{lat}}')\n"
+            f"except urllib.error.HTTPError as e:\n"
+            f"    lat = round((time.perf_counter() - t0) * 1000.0, 2)\n"
+            f"    print(f'HTTP_ERR:{{e.code}}:{{lat}}')\n"
+            f"except Exception as e:\n"
+            f"    print(f'FAIL:{{str(e)}}')\n"
+        )
+        try:
+            res = container.exec_run(["python", "-c", script])
+            output = (
+                res.output.decode("utf-8", errors="replace").strip()
+                if hasattr(res.output, "decode")
+                else str(res.output).strip()
+            )
+            if output.startswith("OK:"):
+                parts = output.split(":")
+                code = int(parts[1])
+                lat = float(parts[2])
+                return {
+                    "available": True,
+                    "url": f"http://127.0.0.1:{port}/health",
+                    "status_code": code,
+                    "latency_ms": lat,
+                    "is_healthy": (code == 200),
+                }
+            elif output.startswith("HTTP_ERR:"):
+                parts = output.split(":")
+                code = int(parts[1])
+                lat = float(parts[2])
+                return {
+                    "available": True,
+                    "url": f"http://127.0.0.1:{port}/health",
+                    "status_code": code,
+                    "latency_ms": lat,
+                    "is_healthy": False,
+                }
+            elif output.startswith("FAIL:"):
+                return {
+                    "available": True,
+                    "url": f"http://127.0.0.1:{port}/health",
+                    "status_code": None,
+                    "latency_ms": None,
+                    "is_healthy": False,
+                    "reason": output[5:],
+                }
+        except Exception as e:
+            logger.debug("Exec health probe failed on container %s: %s", getattr(container, "short_id", "unknown"), e)
 
     return {
         "available": False,
         "reason": "HTTP health endpoint could not be reached from platform environment.",
+        "status_code": None,
+        "latency_ms": None,
+        "is_healthy": False,
+    }
+
+
+def probe_service_traffic(container: Any, service_name: str, timeout: float = 3.0) -> dict[str, Any]:
+    """
+    Probe the primary application traffic route of the target service.
+    Directly measures real round-trip latency and HTTP status code over the network.
+    Uses direct HTTP when accessible, falling back to loopback inside container network namespace.
+    """
+    port = SERVICE_PORTS.get(service_name)
+    path = SERVICE_PRIMARY_ROUTES.get(service_name, "/")
+    endpoints_to_try = []
+
+    # 1. Check published host ports
+    try:
+        ports_dict = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+        for container_port_spec, host_bindings in ports_dict.items():
+            if host_bindings:
+                for binding in host_bindings:
+                    host_ip = binding.get("HostIp", "127.0.0.1")
+                    if host_ip == "0.0.0.0":
+                        host_ip = "127.0.0.1"
+                    host_port = binding.get("HostPort")
+                    if host_port:
+                        endpoints_to_try.append(f"http://{host_ip}:{host_port}{path}")
+    except Exception:
+        pass
+
+    # 2. Direct service name and loopback
+    if port:
+        endpoints_to_try.append(f"http://{service_name}:{port}{path}")
+        endpoints_to_try.append(f"http://127.0.0.1:{port}{path}")
+
+    # Try direct HTTP first
+    for url in endpoints_to_try:
+        t0 = time.perf_counter()
+        try:
+            resp = requests.get(url, timeout=timeout)
+            latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            return {
+                "available": True,
+                "url": url,
+                "path": path,
+                "status_code": resp.status_code,
+                "latency_ms": latency_ms,
+                "is_healthy": (resp.status_code == 200),
+            }
+        except requests.exceptions.RequestException:
+            continue
+
+    # Fallback: execute loopback probe inside container network namespace
+    if port and container is not None and hasattr(container, "exec_run"):
+        try:
+            status = getattr(container, "status", "")
+            state = getattr(container, "attrs", {}).get("State", {})
+            if status == "paused" or state.get("Paused") is True:
+                return {
+                    "available": False,
+                    "path": path,
+                    "reason": "Container is paused; cannot execute traffic probe.",
+                    "status_code": None,
+                    "latency_ms": None,
+                    "is_healthy": False,
+                }
+        except Exception:
+            pass
+
+        script = (
+            f"import urllib.request, time\n"
+            f"t0 = time.perf_counter()\n"
+            f"try:\n"
+            f"    with urllib.request.urlopen('http://127.0.0.1:{port}{path}', timeout={timeout}) as r:\n"
+            f"        code = r.status\n"
+            f"        lat = round((time.perf_counter() - t0) * 1000.0, 2)\n"
+            f"        print(f'OK:{{code}}:{{lat}}')\n"
+            f"except urllib.error.HTTPError as e:\n"
+            f"    lat = round((time.perf_counter() - t0) * 1000.0, 2)\n"
+            f"    print(f'HTTP_ERR:{{e.code}}:{{lat}}')\n"
+            f"except Exception as e:\n"
+            f"    print(f'FAIL:{{str(e)}}')\n"
+        )
+        try:
+            res = container.exec_run(["python", "-c", script])
+            output = (
+                res.output.decode("utf-8", errors="replace").strip()
+                if hasattr(res.output, "decode")
+                else str(res.output).strip()
+            )
+            if output.startswith("OK:"):
+                parts = output.split(":")
+                code = int(parts[1])
+                lat = float(parts[2])
+                return {
+                    "available": True,
+                    "url": f"http://127.0.0.1:{port}{path}",
+                    "path": path,
+                    "status_code": code,
+                    "latency_ms": lat,
+                    "is_healthy": (code == 200),
+                }
+            elif output.startswith("HTTP_ERR:"):
+                parts = output.split(":")
+                code = int(parts[1])
+                lat = float(parts[2])
+                return {
+                    "available": True,
+                    "url": f"http://127.0.0.1:{port}{path}",
+                    "path": path,
+                    "status_code": code,
+                    "latency_ms": lat,
+                    "is_healthy": False,
+                }
+            elif output.startswith("FAIL:"):
+                return {
+                    "available": True,
+                    "url": f"http://127.0.0.1:{port}{path}",
+                    "path": path,
+                    "status_code": None,
+                    "latency_ms": None,
+                    "is_healthy": False,
+                    "reason": output[5:],
+                }
+        except Exception:
+            pass
+
+    return {
+        "available": False,
+        "path": path,
+        "reason": "Traffic probe could not reach target service endpoint.",
+        "status_code": None,
+        "latency_ms": None,
+        "is_healthy": False,
     }
 
 
@@ -415,6 +761,8 @@ class ExperimentExecutor:
             container = None
             is_paused = False
             is_stopped = False
+            has_http_fault = False
+            has_resource_stress = False
             execution_error = None
             cleanup_error = None
 
@@ -430,12 +778,14 @@ class ExperimentExecutor:
                 state_before = self.docker_service.inspect_container_state(container)
                 stats_before = self.docker_service.get_container_stats(container)
                 http_before = probe_service_http_health(container, experiment.target_service)
+                traffic_before = probe_service_traffic(container, experiment.target_service)
 
                 result_metrics["before"] = {
                     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "container_state": state_before,
                     "container_stats": stats_before,
                     "http_health": http_before,
+                    "service_traffic": traffic_before,
                 }
                 experiment.baseline_metrics = result_metrics["before"]
                 db.session.commit()
@@ -456,16 +806,46 @@ class ExperimentExecutor:
                 elif fault_type == "service_failure":
                     self.docker_service.stop_container(container, timeout=stop_timeout)
                     is_stopped = True
+                elif fault_type in ("latency", "http_error"):
+                    self.docker_service.inject_http_fault(
+                        container=container,
+                        service_name=experiment.target_service,
+                        fault_type=fault_type,
+                        parameters=parameters,
+                    )
+                    has_http_fault = True
+                elif fault_type == "resource_stress":
+                    self.docker_service.inject_resource_stress(
+                        container=container,
+                        stress_type=parameters.get("stress_type", "cpu"),
+                        cpu_workers=parameters.get("cpu_workers", 1),
+                        cpu_load=parameters.get("cpu_load", 80),
+                        memory_workers=parameters.get("memory_workers", 1),
+                        memory_bytes=parameters.get("memory_bytes", "128M"),
+                        duration_seconds=duration_seconds,
+                    )
+                    has_resource_stress = True
                 else:
                     raise ValueError(f"Unsupported fault type: {fault_type}")
 
                 # 4. Capture Observations During Fault
                 state_during = self.docker_service.inspect_container_state(container)
+                stats_during = self.docker_service.get_container_stats(container)
                 http_during = probe_service_http_health(container, experiment.target_service)
+                traffic_during = probe_service_traffic(container, experiment.target_service)
+
+                if fault_type == "latency" and traffic_during.get("available"):
+                    http_during["latency_ms"] = traffic_during.get("latency_ms")
+                elif fault_type == "http_error" and traffic_during.get("available"):
+                    http_during["status_code"] = traffic_during.get("status_code")
+                    http_during["is_healthy"] = traffic_during.get("is_healthy")
+
                 result_metrics["during"] = {
                     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "container_state": state_during,
+                    "container_stats": stats_during,
                     "http_health": http_during,
+                    "service_traffic": traffic_during,
                 }
                 experiment.result_metrics = result_metrics
                 db.session.commit()
@@ -485,23 +865,58 @@ class ExperimentExecutor:
                 recovery_start_time = time.perf_counter()
 
                 if container is not None:
-                    # Guarantee unpause
-                    if is_paused:
+                    # Guarantee unpause for paused container (service_pause)
+                    if is_paused or fault_type == "service_pause":
                         try:
-                            self.docker_service.unpause_container(container)
-                            logger.info("Successfully unpaused container %s", container.short_id)
+                            if is_paused:
+                                self.docker_service.unpause_container(container)
+                                logger.info("Successfully unpaused container %s", container.short_id)
+                            else:
+                                state_check = self.docker_service.inspect_container_state(container)
+                                if state_check.get("paused") or state_check.get("status") == "paused":
+                                    self.docker_service.unpause_container(container)
+                                    logger.info("Successfully unpaused container %s", container.short_id)
                         except Exception as e:
                             cleanup_error = f"Failed to unpause container: {str(e)}"
                             logger.error("Cleanup error unpausing container %s: %s", container.short_id, cleanup_error)
 
-                    # Guarantee start
-                    if is_stopped:
+                    # Guarantee start for stopped container (service_failure)
+                    if is_stopped or fault_type == "service_failure":
                         try:
-                            self.docker_service.start_container(container)
-                            logger.info("Successfully restarted container %s", container.short_id)
+                            if is_stopped:
+                                self.docker_service.start_container(container)
+                                logger.info("Successfully restarted container %s", container.short_id)
+                            else:
+                                state_check = self.docker_service.inspect_container_state(container)
+                                if not state_check.get("running") or state_check.get("status") in ("exited", "stopped", "created"):
+                                    self.docker_service.start_container(container)
+                                    logger.info("Successfully restarted container %s", container.short_id)
                         except Exception as e:
                             cleanup_error = f"Failed to restart stopped container: {str(e)}"
                             logger.error("Cleanup error starting container %s: %s", container.short_id, cleanup_error)
+
+                    # Guarantee resource stress cleanup
+                    if has_resource_stress:
+                        try:
+                            self.docker_service.stop_resource_stress(container)
+                            stopped_ok = self.docker_service.verify_resource_stress_stopped(container)
+                            if not stopped_ok:
+                                cleanup_error = "Stress processes failed to terminate during cleanup."
+                                logger.error("Stress process cleanup error on container %s", container.short_id)
+                            else:
+                                logger.info("Successfully stopped and verified stress processes on container %s", container.short_id)
+                        except Exception as e:
+                            cleanup_error = f"Failed to stop stress processes: {str(e)}"
+                            logger.error("Cleanup error stopping stress on container %s: %s", container.short_id, cleanup_error)
+
+                    # Guarantee HTTP fault removal
+                    if has_http_fault:
+                        try:
+                            self.docker_service.remove_http_fault(container, experiment.target_service)
+                            logger.info("Successfully cleared HTTP/network fault on container %s", container.short_id)
+                        except Exception as e:
+                            cleanup_error = f"Failed to remove HTTP fault: {str(e)}"
+                            logger.error("Cleanup error removing HTTP fault on container %s: %s", container.short_id, cleanup_error)
 
                 result_metrics["cleanup"]["success"] = (cleanup_error is None)
                 result_metrics["cleanup"]["error"] = cleanup_error
@@ -513,86 +928,176 @@ class ExperimentExecutor:
                 evidence = "No recovery check performed."
 
                 if container is not None and cleanup_error is None:
-                    # Poll container status until healthy/running or verification timeout
                     recovery_timeout = float(parameters.get("recovery_timeout", RECOVERY_VERIFICATION_TIMEOUT))
                     deadline = time.perf_counter() + recovery_timeout
-                    while time.perf_counter() < deadline:
 
+                    last_state = {}
+                    last_http_check = {}
+                    last_traffic_check = {}
+
+                    while time.perf_counter() < deadline:
                         try:
                             container.reload()
                             state_now = self.docker_service.inspect_container_state(container)
-                            health_status = state_now.get("health", "none")
-                            is_running = state_now.get("status") == "running"
+                            last_state = state_now
 
-                            if is_running:
-                                elapsed = round(time.perf_counter() - recovery_start_time, 2)
-                                if health_status == "healthy":
+                            c_status = state_now.get("status", "")
+                            is_paused_now = state_now.get("paused") is True or c_status == "paused"
+                            is_running_now = state_now.get("running") is True and c_status == "running" and not is_paused_now
+                            health_status = state_now.get("health", "none")
+
+                            # 1. Container is still paused (unpause not finished / failed)
+                            if is_paused_now:
+                                time.sleep(0.5)
+                                continue
+
+                            # 2. Container is stopped or exited (start not finished / crashed)
+                            if not is_running_now:
+                                time.sleep(0.5)
+                                continue
+
+                            elapsed = round(time.perf_counter() - recovery_start_time, 2)
+
+                            if fault_type == "resource_stress":
+                                stopped_ok = self.docker_service.verify_resource_stress_stopped(container)
+                                if stopped_ok:
                                     recovery_verified = True
                                     recovery_status = "verified"
                                     recovery_time_seconds = elapsed
                                     evidence = (
-                                        f"Container status returned to 'running' and healthcheck reported 'healthy' "
-                                        f"in {elapsed}s."
+                                        f"Stress processes terminated and container returned to normal "
+                                        f"running state in {elapsed}s."
                                     )
                                     break
-                                elif health_status in ("none", ""):
-                                    # Container has no configured docker healthcheck; check HTTP probe
-                                    http_check = probe_service_http_health(container, experiment.target_service)
-                                    if http_check.get("available") and http_check.get("status_code") == 200:
+
+                            elif fault_type == "latency":
+                                tr = probe_service_traffic(container, experiment.target_service)
+                                last_traffic_check = tr
+                                injected_lat = parameters.get("latency_ms", DEFAULT_LATENCY_MS)
+                                if tr.get("available") and tr.get("status_code") == 200:
+                                    if tr.get("latency_ms", 0) < max(50.0, injected_lat * 0.7):
                                         recovery_verified = True
                                         recovery_status = "verified"
                                         recovery_time_seconds = elapsed
                                         evidence = (
-                                            f"Container status returned to 'running' and HTTP health check passed (200 OK) "
-                                            f"in {elapsed}s."
+                                            f"Injected network latency removed. Primary service traffic response time "
+                                            f"returned to normal ({tr.get('latency_ms')} ms) in {elapsed}s."
                                         )
                                         break
+
+                            elif fault_type == "http_error":
+                                tr = probe_service_traffic(container, experiment.target_service)
+                                last_traffic_check = tr
+                                if tr.get("available") and tr.get("status_code") == 200:
+                                    recovery_verified = True
+                                    recovery_status = "verified"
+                                    recovery_time_seconds = elapsed
+                                    evidence = (
+                                        f"Injected HTTP {parameters.get('error_code', 500)} error removed. "
+                                        f"Primary service traffic returned to HTTP 200 OK in {elapsed}s."
+                                    )
+                                    break
+
+                            else:
+                                # service_pause or service_failure
+                                # Verify actual service responsiveness and/or health
+                                http_check = probe_service_http_health(container, experiment.target_service)
+                                last_http_check = http_check
+
+                                # When HTTP health check is reachable
+                                if http_check.get("available"):
+                                    if http_check.get("is_healthy"):
+                                        if health_status in ("healthy", "none", ""):
+                                            recovery_verified = True
+                                            recovery_status = "verified"
+                                            recovery_time_seconds = elapsed
+                                            h_info = f", Docker health: {health_status}" if health_status != "none" else ""
+                                            evidence = (
+                                                f"Container resumed to 'running' state and confirmed responding via HTTP health probe "
+                                                f"(HTTP 200 OK, {http_check.get('latency_ms')} ms{h_info}) in {elapsed}s."
+                                            )
+                                            break
+                                        elif health_status == "starting":
+                                            # If Docker healthcheck is configured and in start period, allow time unless deadline
+                                            pass
+                                        elif health_status == "unhealthy":
+                                            # Docker healthcheck still reports unhealthy, wait for periodic refresh
+                                            pass
                                     else:
-                                        # Container is running, HTTP probe unmapped or starting
-                                        recovery_status = "unverified"
-                                        recovery_time_seconds = elapsed
-                                        evidence = (
-                                            f"Container status is 'running' after {elapsed}s, but healthcheck is "
-                                            f"unconfigured or HTTP probe could not verify application readiness."
-                                        )
-                                        break
+                                        # HTTP probe returned unhealthy / error - keep waiting until deadline
+                                        pass
+                                elif health_status == "healthy":
+                                    # Target container has no reachable HTTP endpoint, but Docker healthcheck is active and healthy
+                                    recovery_verified = True
+                                    recovery_status = "verified"
+                                    recovery_time_seconds = elapsed
+                                    evidence = (
+                                        f"Container status returned to 'running' and Docker healthcheck reported 'healthy' "
+                                        f"in {elapsed}s."
+                                    )
+                                    break
+
                         except Exception as reload_err:
                             logger.warning("Error inspecting container during recovery: %s", reload_err)
 
                         time.sleep(0.5)
 
-                    if not recovery_verified and recovery_status != "unverified":
-                        recovery_status = "failed"
-                        evidence = f"Container did not recover to a healthy running state within {RECOVERY_VERIFICATION_TIMEOUT}s."
+                    if not recovery_verified:
+                        if last_state.get("paused") is True or last_state.get("status") == "paused":
+                            recovery_status = "failed"
+                            evidence = f"Container {container.short_id} remained in 'paused' state after cleanup; execution did not resume within {recovery_timeout}s."
+                        elif not last_state.get("running") or last_state.get("status") in ("exited", "stopped", "dead"):
+                            recovery_status = "failed"
+                            exit_code = last_state.get("exit_code", "unknown")
+                            evidence = f"Container {container.short_id} is in '{last_state.get('status', 'stopped')}' state (exit code {exit_code}); service did not restart within {recovery_timeout}s."
+                        elif last_http_check.get("available") and not last_http_check.get("is_healthy"):
+                            recovery_status = "failed"
+                            code = last_http_check.get("status_code")
+                            err_reason = last_http_check.get("reason", "unhealthy")
+                            evidence = f"Container {container.short_id} returned to 'running' state, but HTTP health probe failed (HTTP {code or err_reason}) within {recovery_timeout}s."
+                        elif last_state.get("health") == "unhealthy":
+                            recovery_status = "failed"
+                            evidence = f"Container {container.short_id} is running, but Docker healthcheck reported 'unhealthy' within {recovery_timeout}s."
+                        elif not last_http_check.get("available") and last_state.get("health") in ("starting", "none", ""):
+                            recovery_status = "unverified"
+                            evidence = f"Container {container.short_id} returned to 'running' state, but healthcheck is in '{last_state.get('health')}' status and HTTP probe could not verify application readiness within {recovery_timeout}s."
+                        else:
+                            recovery_status = "failed"
+                            evidence = f"Container {container.short_id} did not recover to a verified responding state within {recovery_timeout}s."
                 else:
                     recovery_status = "failed"
                     evidence = f"Recovery failed due to cleanup or container error: {cleanup_error or execution_error}"
 
                 # Capture After observations
                 state_after = self.docker_service.inspect_container_state(container) if container else {}
+                stats_after = self.docker_service.get_container_stats(container) if container else {}
                 http_after = probe_service_http_health(container, experiment.target_service) if container else {}
+                traffic_after = probe_service_traffic(container, experiment.target_service) if container else {}
+
                 result_metrics["after"] = {
                     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "container_state": state_after,
+                    "container_stats": stats_after,
                     "http_health": http_after,
+                    "service_traffic": traffic_after,
                 }
 
                 result_metrics["recovery_verification"] = {
                     "status": recovery_status,
                     "verified": recovery_verified,
-                    "recovery_time_seconds": recovery_time_seconds,
+                    "recovery_time_seconds": recovery_time_seconds if recovery_verified else None,
                     "evidence": evidence,
                 }
 
                 # 8. Record Final Experiment State
                 experiment.ended_at = datetime.datetime.now(datetime.timezone.utc)
-                experiment.recovery_time_seconds = recovery_time_seconds
+                experiment.recovery_time_seconds = recovery_time_seconds if recovery_verified else None
                 experiment.result_metrics = result_metrics
 
                 if cancel_event.is_set():
                     experiment.status = "cancelled"
                     experiment.error_message = execution_error or "Experiment was cancelled by user."
-                elif execution_error or cleanup_error or recovery_status in ("failed", "unverified"):
+                elif execution_error or cleanup_error or not recovery_verified or recovery_status != "verified":
                     experiment.status = "failed"
                     experiment.error_message = (
                         cleanup_error or execution_error
@@ -646,8 +1151,6 @@ def reconcile_orphaned_experiments(app: Flask) -> None:
                     )
                     state = docker_service.inspect_container_state(container)
 
-                    # Persisted evidence verification: FaultLab must have recorded active
-                    # fault injection ('during' observations) on this exact container
                     has_persisted_fault_evidence = bool(
                         exp.result_metrics and exp.result_metrics.get("during")
                     )
@@ -656,12 +1159,18 @@ def reconcile_orphaned_experiments(app: Flask) -> None:
                         recovery_notes.append(
                             "No persisted evidence of active fault injection prior to restart; container left unmodified."
                         )
-                    elif exp.fault_type == "service_pause" and state.get("paused"):
+                    elif exp.fault_type == "service_pause" and (state.get("paused") or state.get("status") == "paused"):
                         docker_service.unpause_container(container)
                         recovery_notes.append("Unpaused orphaned paused container based on persisted fault evidence.")
                     elif exp.fault_type == "service_failure" and not state.get("running"):
                         docker_service.start_container(container)
                         recovery_notes.append("Restarted orphaned stopped container based on persisted fault evidence.")
+                    elif exp.fault_type == "resource_stress":
+                        docker_service.stop_resource_stress(container)
+                        recovery_notes.append("Terminated orphaned resource stress processes on container.")
+                    elif exp.fault_type in ("latency", "http_error"):
+                        docker_service.remove_http_fault(container, exp.target_service)
+                        recovery_notes.append("Cleared orphaned HTTP/network fault on container.")
                     else:
                         recovery_notes.append(f"Container was already in state: {state.get('status')}.")
                 except Exception as e:
@@ -676,7 +1185,6 @@ def reconcile_orphaned_experiments(app: Flask) -> None:
                 f"Platform server was restarted while this experiment was running. "
                 f"Reconciliation: {note_str}"
             )
-
 
         try:
             db.session.commit()

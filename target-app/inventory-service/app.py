@@ -3,6 +3,9 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
+from fault_interceptor import init_fault_interceptor
+init_fault_interceptor(app)
+
 # In-memory realistic inventory records keyed by product_id
 INVENTORY = {
     "prod-1": {"product_id": "prod-1", "stock": 50},

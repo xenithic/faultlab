@@ -16,6 +16,7 @@ def index():
 
 
 @health_bp.route("/health", methods=["GET"])
+@health_bp.route("/api/health", methods=["GET"])
 def health():
     """Basic platform liveness healthcheck endpoint."""
     return jsonify({

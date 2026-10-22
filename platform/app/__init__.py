@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from .config import get_config
 from .extensions import db, migrate
 
@@ -10,6 +10,23 @@ def create_app(config_name: str | None = None) -> Flask:
     app = Flask(__name__)
     config_obj = get_config(config_name)
     app.config.from_object(config_obj)
+
+    # Enable native CORS support for browser frontends
+    @app.after_request
+    def add_cors_headers(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
+
+    @app.before_request
+    def handle_options_preflight():
+        if request.method == "OPTIONS":
+            response = app.make_default_options_response()
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+            return response
 
     # Initialize extensions
     db.init_app(app)
