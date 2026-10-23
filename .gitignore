@@ -26,3 +26,10 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Frontend build output
+frontend/dist/
